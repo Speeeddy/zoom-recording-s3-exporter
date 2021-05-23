@@ -7,10 +7,10 @@ This tool is beneficial for Zoom Pro users who need to store recording to a pers
 # Installation instructions
 
 ## Setting up the CloudFormation stack
-Use AWS SAM CLI to deploy this application. Clone this repository, and using SAM CLI from inside the cloned folder, execute:
-`sam build` (Requires python3.7/pip)
-`sam deploy --guided --capabilities CAPABILITY_NAMED_IAM` (Requires AWS credentials)
-You may need to configure your AWS User credentials using `aws configure` prior to deploy step.
+Use AWS SAM CLI to deploy this application. Clone this repository, and using SAM CLI from inside the cloned folder, execute:  
+1. `sam build` (Requires python3.7/pip)  
+2. `sam deploy --guided --capabilities CAPABILITY_NAMED_IAM` (Requires AWS credentials)  
+You may need to configure your AWS User credentials using `aws configure` (using AWS CLI) prior to deploy step. 
 
 Other than this, you can also set this up directly using AWS CloudFormation by creating a stack. Note that the Lambda code may need to be inputted into `template.yaml` file (InlineCode) or set up separately.
 
@@ -26,8 +26,8 @@ This template deploys resources needed for creating an API Gateway endpoint  to 
 The list of parameters for this template:
 
 ### ApiGatewayStageName 
-Type: String 
-Default: Release 
+Type: String  
+Default: Release  
 Description: Name of the stage of API Gateway. Affects the endpoint URL. 
 ### S3BucketName 
 Type: String  
