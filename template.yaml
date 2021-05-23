@@ -1,0 +1,184 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  This template deploys resources needed for creating an API Gateway endpoint 
+  to receive request from Zoom Recording Completed webhook, forward them to SQS 
+  queue, and upload the files to S3 bucket using a lambda function. Files must be 
+  less than 500MB in size.
+    
+Parameters:
+  ApiGatewayStageName:
+    Description: Name of the stage of API Gateway. Affects the endpoint URL.
+    Type: String
+    Default: Release
+  S3BucketName:
+    Description: Bucket name of S3 bucket to store recordings to. Bucket is created if "Create bucket" parameter is True. Note that bucket name must be unique globally if creating a new bucket.
+    Type: String
+  CreateNewS3Bucket:
+    Description: True if creating a new bucket, false if reusing an existing bucket.
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  CreateS3BucketCondition: !Equals [!Ref CreateNewS3Bucket, "true"]
+
+Resources:
+  ApiGatewayRestAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties: 
+      Description: REST API endpoint which is hit by Zoom recording completed webhook
+      EndpointConfiguration: 
+        Types: 
+          - REGIONAL
+      Name: !Sub ZoomRecComplete-${AWS::StackName}
+
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties: 
+      ParentId: !GetAtt ApiGatewayRestAPI.RootResourceId
+      PathPart: enqueue
+      RestApiId: !Ref ApiGatewayRestAPI
+
+  ApiGatewayPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties: 
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration: 
+        Credentials: !GetAtt ApiGatewayIntegrationSendMessageSqsRole.Arn
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: NEVER
+        RequestParameters: 
+          integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+        RequestTemplates: 
+          application/json : Action=SendMessage&MessageBody=$input.json('$')&MessageGroupId=1
+        Type: AWS
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/${ZoomRecordingSqsFifo.QueueName}
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: ""
+            StatusCode: "200"
+      MethodResponses:
+        - ResponseModels:
+            application/json: Empty 
+          StatusCode: "200"
+      ResourceId: !Ref ApiGatewayResource
+      RestApiId: !Ref ApiGatewayRestAPI
+
+  ApiGatewayOptionsCorsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties: 
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration: 
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates: 
+          application/json : "{\"statusCode\": 200}"
+        Type: MOCK
+        IntegrationHttpMethod: OPTIONS
+        IntegrationResponses:
+        - ResponseTemplates:
+            application/json: ""
+          StatusCode: "200"
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          ResponseModels:
+            application/json: Empty 
+          StatusCode: "200"
+      ResourceId: !Ref ApiGatewayResource
+      RestApiId: !Ref ApiGatewayRestAPI
+
+  ApiGatewayDeployment:
+    DependsOn: 
+      - ApiGatewayOptionsCorsMethod
+      - ApiGatewayPostMethod
+    Type: AWS::ApiGateway::Deployment
+    Properties: 
+      RestApiId: !Ref ApiGatewayRestAPI
+      StageName: !Ref ApiGatewayStageName
+
+  ZoomRecordingSqsFifo:
+    Type: AWS::SQS::Queue
+    Properties: 
+      ContentBasedDeduplication: true
+      DelaySeconds: 15
+      FifoQueue: true
+      QueueName: !Sub ZoomRecCompleteQ-${AWS::StackName}.fifo
+      VisibilityTimeout: 300
+
+  ApiGatewayIntegrationSendMessageSqsRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: Role to allow API Gateway to send message into SQS
+      Policies: 
+        - 
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: "Allow"
+                Action: "sqs:SendMessage"
+                Resource: !GetAtt ZoomRecordingSqsFifo.Arn
+          PolicyName: sendmessagesqs-inline
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs 
+      RoleName: !Sub ApiGwToSqsRole-${AWS::StackName}
+      
+  S3BucketToCreate:
+    Condition: CreateS3BucketCondition
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Ref S3BucketName
+      
+  StoreToS3LambdaSAM:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Lambda to download recording files and upload to S3
+      Environment: 
+        Variables: 
+          BucketName: !Ref S3BucketName
+      Events:
+        SqsEvent:
+          Type: SQS
+          Properties:
+            BatchSize: 1
+            Enabled: true
+            Queue: !GetAtt ZoomRecordingSqsFifo.Arn
+      FunctionName: !Sub ZoomRecS3Uploader-${AWS::StackName}
+      Handler: ZoomToS3Lambda.lambda_handler
+      CodeUri: .
+      Layers: 
+        - arn:aws:lambda:ap-south-1:770693421928:layer:Klayers-python38-requests:16
+      MemorySize: 128
+      Policies: 
+        - Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: s3:*
+            Resource: 
+              - !Sub "arn:aws:s3:::${S3BucketName}"
+              - !Sub "arn:aws:s3:::${S3BucketName}/*"
+      Runtime: python3.7
+      Timeout: 300
+      
+Outputs:
+  ZoomRecordingCompleteWebhookUrl:
+    Description: API Gateway endpoint URL which will be called by Zoom whenever there is a new recording available.
+    Value: !Sub https://${ApiGatewayRestAPI}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStageName}/enqueue
+    
